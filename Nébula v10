@@ -1,0 +1,1008 @@
+--[[ NEBULA X v10 | ESP + AIM + HITBOX + TIME (universal) + CORES ]]
+local function NEBULA_MAIN()
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local LP = Players.LocalPlayer
+local genv = (getgenv and getgenv()) or _G
+if genv.__NEBULAX_UNLOAD then pcall(genv.__NEBULAX_UNLOAD) end
+
+---------------------------------------------------------------- CONFIG
+local HB_MAX = 99
+local S = {
+    team = {ignore=true, auto=true},
+    esp = {on=false, box=true, boxStyle="Cantos", name=true, dist=true,
+           health=true, hpText=false, healthSide="Esquerda", line=false, lineFrom="Baixo",
+           skel=false, wall=true, range=12000},
+    aim = {on=false, showFov=true, wallCheck=true, part="Cabeça", fov=120, smooth=35},
+    hb  = {on=false, part="Corpo", size=6, trans=6, range=99999},
+    col = {esp=Color3.fromRGB(0,255,0), wall=Color3.fromRGB(255,0,0),
+           fov=Color3.fromRGB(255,255,255), hb=Color3.fromRGB(255,140,0),
+           menu1=Color3.fromRGB(255,60,200), menu2=Color3.fromRGB(0,220,255),
+           orb1=Color3.fromRGB(255,60,200), orb2=Color3.fromRGB(0,220,255)},
+}
+
+local BG     = Color3.fromRGB(12,12,20)
+local PANEL  = Color3.fromRGB(26,26,42)
+local HEAD   = Color3.fromRGB(22,16,40)
+local PINK   = Color3.fromRGB(255,60,200)
+local CYAN   = Color3.fromRGB(0,220,255)
+local ON_C   = Color3.fromRGB(0,210,120)
+local OFF_C  = Color3.fromRGB(235,60,80)
+local WHITE  = Color3.new(1,1,1)
+local BLACK  = Color3.new(0,0,0)
+local GRAD   = ColorSequence.new(PINK, CYAN)
+local conns = {}
+
+---------------------------------------------------------------- HELPERS
+local function mk(class, props, parent)
+    local i = Instance.new(class)
+    for k,v in pairs(props or {}) do
+        pcall(function() i[k]=v end)
+    end
+    if parent then i.Parent = parent end
+    return i
+end
+local menuGrads, orbGrads, menuScrolls, menuStrokes = {}, {}, {}, {}
+local function grad(parent, rot)
+    local g = mk("UIGradient",{Color=ColorSequence.new(S.col.menu1, S.col.menu2),Rotation=rot or 0},parent)
+    table.insert(menuGrads, g)
+    return g
+end
+local function getParent()
+    local ok,h = pcall(function() return gethui and gethui() end)
+    if ok and h then return h end
+    local ok2,cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok2 and cg then
+        local t = Instance.new("Folder")
+        local ok3 = pcall(function() t.Parent = cg end)
+        t:Destroy()
+        if ok3 then return cg end
+    end
+    return LP:WaitForChild("PlayerGui")
+end
+
+local PARENT = getParent()
+local layer = mk("ScreenGui",{Name="NX_Layer",ResetOnSpawn=false,IgnoreGuiInset=true,DisplayOrder=998},PARENT)
+local gui   = mk("ScreenGui",{Name="NX_Menu",ResetOnSpawn=false,IgnoreGuiInset=true,DisplayOrder=999},PARENT)
+
+local function cam() return workspace.CurrentCamera end
+
+---------------------------------------------------------------- TIME (detecção universal)
+-- Procura "pistas" de time em vários lugares: Team do Roblox, atributos, valores
+-- no jogador / leaderstats / personagem e a pasta onde o personagem está.
+-- Só usa uma pista se ela realmente separa os jogadores em grupos diferentes,
+-- assim nunca esconde todo mundo por engano.
+local OVER = {}          -- marcação manual: [UserId] = true (aliado) / false (inimigo)
+local allyCache = {}     -- [player] = true se for aliado
+local teamMethod = nil
+local teamAllyCount = 0
+
+local function teamLike(n)
+    n = string.lower(tostring(n))
+    if n:find("team") or n:find("equipe") or n:find("squad") or n:find("faction") then return true end
+    return n=="time" or n=="timeid" or n=="timename" or n=="side" or n=="lado"
+end
+
+local function candidates(p)
+    local list, map = {}, {}
+    local function add(k,v)
+        if v == nil or v == "" or v == "Neutral" then return end
+        if map[k] ~= nil then return end
+        map[k] = v
+        list[#list+1] = {k,v}
+    end
+    local function scan(inst, tag)
+        if not inst then return end
+        for n,v in pairs(inst:GetAttributes()) do
+            if teamLike(n) then add(tag.." atributo "..n, v) end
+        end
+        for _,ch in ipairs(inst:GetChildren()) do
+            if ch:IsA("ValueBase") and teamLike(ch.Name) then add(tag.." valor "..ch.Name, ch.Value) end
+        end
+    end
+    if p.Team then add("Team do Roblox", p.Team) end
+    scan(p, "Player")
+    scan(p:FindFirstChild("leaderstats"), "Stats")
+    local char = p.Character
+    if char then
+        scan(char, "Char")
+        local par = char.Parent
+        if par and par ~= workspace then add("Pasta do personagem", par) end
+    end
+    return list, map
+end
+
+local function refreshTeams()
+    local mine = candidates(LP)
+    local maps = {}
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p ~= LP then
+            local _, m = candidates(p)
+            maps[p] = m
+        end
+    end
+    local method
+    for _,e in ipairs(mine) do
+        for _,m in pairs(maps) do
+            local v = m[e[1]]
+            if v ~= nil and v ~= e[2] then method = e break end
+        end
+        if method then break end
+    end
+    teamMethod = method and method[1] or nil
+    local n = 0
+    for p,m in pairs(maps) do
+        local ally = false
+        if S.team.auto and method then
+            local v = m[method[1]]
+            ally = (v ~= nil and v == method[2])
+        end
+        local ov = OVER[p.UserId]
+        if ov ~= nil then ally = ov end
+        allyCache[p] = ally
+        if ally then n = n + 1 end
+    end
+    for p in pairs(allyCache) do
+        if not maps[p] then allyCache[p] = nil end
+    end
+    teamAllyCount = n
+end
+
+local function sameTeam(p)
+    if p == LP then return true end
+    return allyCache[p] == true
+end
+local function isEnemy(p)
+    if p == LP then return false end
+    if S.team.ignore and allyCache[p] == true then return false end
+    return true
+end
+
+local function getRoot(char)
+    return char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+        or char:FindFirstChild("Head") or char:FindFirstChildWhichIsA("BasePart")
+end
+local function isAlive(char)
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then return hum.Health > 0, hum end
+    return true, nil
+end
+
+-- lê a vida real (Humanoid ou valores guardados pelo jogo)
+local function readHealth(char, hum)
+    local hp = hum and hum.Health
+    local mx = hum and hum.MaxHealth
+    for _,n in ipairs({"Health","HP","Vida"}) do
+        local v = char:GetAttribute(n)
+        if type(v) == "number" then hp = v break end
+    end
+    for _,n in ipairs({"MaxHealth","MaxHP","VidaMax"}) do
+        local v = char:GetAttribute(n)
+        if type(v) == "number" then mx = v break end
+    end
+    if not hp then return nil end
+    if (not mx) or mx ~= mx or mx <= 0 or mx >= 1e6 then mx = math.max(hp, 100) end
+    return hp, mx
+end
+
+local rp = RaycastParams.new()
+rp.FilterType = Enum.RaycastFilterType.Exclude
+rp.IgnoreWater = true
+local function visible(part, char)
+    local c = cam()
+    if not c then return true end
+    local origin = c.CFrame.Position
+    local dir = part.Position - origin
+    local ignore = {char}
+    local mine = LP.Character
+    if mine then table.insert(ignore, mine) end
+    for _=1,6 do
+        rp.FilterDescendantsInstances = ignore
+        local r = workspace:Raycast(origin, dir, rp)
+        if not r then return true end
+        local h = r.Instance
+        if h.Transparency >= 0.95 or not h.CanCollide then
+            table.insert(ignore, h)
+        else
+            return false
+        end
+    end
+    return false
+end
+
+local function makeDraggable(handle, target, onTap, canDrag)
+    local dragging, dragStart, startPos, moved = false, nil, nil, false
+    table.insert(conns, handle.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1 then
+            dragging=true moved=false dragStart=i.Position startPos=target.Position
+            i.Changed:Connect(function()
+                if i.UserInputState==Enum.UserInputState.End then
+                    dragging=false
+                    if onTap and not moved then onTap() end
+                end
+            end)
+        end
+    end))
+    table.insert(conns, UIS.InputChanged:Connect(function(i)
+        if dragging and (not canDrag or canDrag())
+            and (i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseMovement) then
+            local d = i.Position - dragStart
+            if d.Magnitude > 6 then moved = true end
+            if moved then
+                target.Position = UDim2.new(startPos.X.Scale,startPos.X.Offset+d.X,startPos.Y.Scale,startPos.Y.Offset+d.Y)
+            end
+        end
+    end))
+end
+
+---------------------------------------------------------------- MENU
+local main = mk("Frame",{Size=UDim2.fromOffset(380,310),Position=UDim2.fromOffset(20,50),BackgroundColor3=BG,BorderSizePixel=0,Active=true},gui)
+mk("UICorner",{CornerRadius=UDim.new(0,12)},main)
+local mainStroke = mk("UIStroke",{Color=WHITE,Thickness=2.5},main)
+grad(mainStroke, 45)
+
+local header = mk("Frame",{Size=UDim2.new(1,0,0,34),BackgroundColor3=HEAD,BorderSizePixel=0},main)
+mk("UICorner",{CornerRadius=UDim.new(0,12)},header)
+local title = mk("TextLabel",{BackgroundTransparency=1,Position=UDim2.fromOffset(14,0),Size=UDim2.new(1,-60,1,0),
+    Text="NEBULA X",TextColor3=WHITE,Font=Enum.Font.GothamBlack,TextSize=16,TextXAlignment=Enum.TextXAlignment.Left},header)
+grad(title, 0)
+local btnClose = mk("TextButton",{Size=UDim2.fromOffset(30,24),AnchorPoint=Vector2.new(1,.5),Position=UDim2.new(1,-8,.5,0),
+    BackgroundColor3=OFF_C,Text="X",TextColor3=WHITE,Font=Enum.Font.GothamBold,TextSize=14,AutoButtonColor=false},header)
+mk("UICorner",{CornerRadius=UDim.new(0,7)},btnClose)
+
+local body = mk("Frame",{Position=UDim2.fromOffset(0,34),Size=UDim2.new(1,0,1,-34),BackgroundTransparency=1},main)
+makeDraggable(header, main)
+
+-- botão NX + FIXO/LIVRE
+local locked = true
+local holder = mk("Frame",{Size=UDim2.fromOffset(44,64),Position=UDim2.new(0,8,0.5,-32),BackgroundTransparency=1},gui)
+local orbBg = mk("Frame",{Size=UDim2.fromOffset(44,44),BackgroundColor3=WHITE,BorderSizePixel=0},holder)
+mk("UICorner",{CornerRadius=UDim.new(1,0)},orbBg)
+orbGrads[1] = grad(orbBg, 45)
+table.remove(menuGrads, #menuGrads)
+local orb = mk("TextButton",{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Text="NX",TextColor3=WHITE,
+    Font=Enum.Font.GothamBlack,TextSize=15,AutoButtonColor=false,ZIndex=2},orbBg)
+local lockBtn = mk("TextButton",{Size=UDim2.fromOffset(40,15),Position=UDim2.fromOffset(2,48),
+    Font=Enum.Font.GothamBold,TextSize=9,TextColor3=WHITE,AutoButtonColor=false},holder)
+mk("UICorner",{CornerRadius=UDim.new(1,0)},lockBtn)
+local function refreshLock()
+    lockBtn.Text = locked and "FIXO" or "LIVRE"
+    lockBtn.BackgroundColor3 = locked and ON_C or OFF_C
+end
+refreshLock()
+lockBtn.Activated:Connect(function() locked = not locked; refreshLock() end)
+makeDraggable(orb, holder, function() main.Visible = not main.Visible end, function() return not locked end)
+btnClose.Activated:Connect(function() main.Visible = false end)
+
+-- abas
+local tabNames = {"ESP","AIM","HITBOX","TIME","CORES"}
+local pages, tabBg, tabGr = {}, {}, {}
+local tabBar = mk("Frame",{Size=UDim2.new(1,-12,0,28),Position=UDim2.fromOffset(6,4),BackgroundTransparency=1},body)
+mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,3)},tabBar)
+local function showTab(name)
+    for n,pg in pairs(pages) do pg.Visible = (n==name) end
+    for n,bg in pairs(tabBg) do
+        bg.BackgroundColor3 = (n==name) and WHITE or PANEL
+        tabGr[n].Enabled = (n==name)
+    end
+end
+for _,n in ipairs(tabNames) do
+    local bg = mk("Frame",{Size=UDim2.new(.2,-3,1,0),BackgroundColor3=PANEL,BorderSizePixel=0},tabBar)
+    mk("UICorner",{CornerRadius=UDim.new(0,7)},bg)
+    tabGr[n] = grad(bg, 0)
+    local b = mk("TextButton",{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,Text=n,TextColor3=WHITE,
+        Font=Enum.Font.GothamBold,TextSize=11,AutoButtonColor=false,ZIndex=2},bg)
+    tabBg[n]=bg
+    local pg = mk("ScrollingFrame",{Position=UDim2.fromOffset(6,38),Size=UDim2.new(1,-12,1,-44),
+        BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=4,ScrollBarImageColor3=PINK,
+        CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false},body)
+    mk("UIListLayout",{Padding=UDim.new(0,4),SortOrder=Enum.SortOrder.LayoutOrder},pg)
+    pages[n]=pg
+    table.insert(menuScrolls, pg)
+    b.Activated:Connect(function() showTab(n) end)
+end
+
+local rowCount = {}
+local function row(page,h)
+    rowCount[page] = (rowCount[page] or 0) + 1
+    local f = mk("Frame",{Size=UDim2.new(1,-8,0,h or 32),BackgroundColor3=PANEL,BorderSizePixel=0,LayoutOrder=rowCount[page]},page)
+    mk("UICorner",{CornerRadius=UDim.new(0,7)},f)
+    return f
+end
+local function label(f,text,w,y)
+    return mk("TextLabel",{BackgroundTransparency=1,Position=UDim2.new(0,10,0,y or 0),
+        Size=UDim2.new(w or .5,0,y and 0 or 1,y and 30 or 0),
+        Text=text,TextColor3=WHITE,TextXAlignment=Enum.TextXAlignment.Left,Font=Enum.Font.GothamMedium,
+        TextSize=12,TextTruncate=Enum.TextTruncate.AtEnd},f)
+end
+local function onoff(f,tbl,key,offX)
+    local b = mk("TextButton",{Size=UDim2.fromOffset(50,22),AnchorPoint=Vector2.new(1,.5),
+        Position=UDim2.new(1,offX or -6,.5,0),Font=Enum.Font.GothamBold,TextSize=12,TextColor3=WHITE,AutoButtonColor=false},f)
+    mk("UICorner",{CornerRadius=UDim.new(0,6)},b)
+    local function r() b.Text = tbl[key] and "ON" or "OFF"; b.BackgroundColor3 = tbl[key] and ON_C or OFF_C end
+    b.Activated:Connect(function() tbl[key]=not tbl[key]; r() end)
+    r()
+end
+local function cycle(f,tbl,key,opts,offX,w)
+    local b = mk("TextButton",{Size=UDim2.fromOffset(w or 70,22),AnchorPoint=Vector2.new(1,.5),
+        Position=UDim2.new(1,offX,.5,0),BackgroundColor3=Color3.fromRGB(70,60,200),Font=Enum.Font.GothamBold,
+        TextSize=11,TextColor3=WHITE,AutoButtonColor=false},f)
+    mk("UICorner",{CornerRadius=UDim.new(0,6)},b)
+    local function r() b.Text = tbl[key].." >" end
+    b.Activated:Connect(function()
+        local i = table.find(opts,tbl[key]) or 0
+        tbl[key] = opts[i % #opts + 1]; r()
+    end)
+    r()
+end
+local function toggleRow(pg,text,tbl,key) local f=row(pg); label(f,text,.6); onoff(f,tbl,key) end
+local function toggleCycleRow(pg,text,tbl,key,ckey,opts)
+    local f=row(pg); label(f,text,.35); onoff(f,tbl,key,-6); cycle(f,tbl,ckey,opts,-62,80)
+end
+local function cycleRow(pg,text,tbl,key,opts) local f=row(pg); label(f,text,.5); cycle(f,tbl,key,opts,-6,90) end
+
+local activeSlide
+table.insert(conns, UIS.InputChanged:Connect(function(i)
+    if activeSlide and (i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseMovement) then
+        activeSlide(i.Position.X)
+    end
+end))
+
+-- SLIDER: arraste a barra para mudar o valor
+local function sliderRow(pg,text,tbl,key,min,max,step,onChange)
+    step = step or 1
+    local f = row(pg,48)
+    label(f,text,.65,2)
+    local valLbl = mk("TextLabel",{BackgroundTransparency=1,AnchorPoint=Vector2.new(1,0),Position=UDim2.new(1,-10,0,4),
+        Size=UDim2.fromOffset(90,16),Text="",TextColor3=CYAN,Font=Enum.Font.GothamBold,TextSize=12,
+        TextXAlignment=Enum.TextXAlignment.Right},f)
+    local bar = mk("Frame",{Position=UDim2.new(0,12,1,-16),Size=UDim2.new(1,-24,0,8),
+        BackgroundColor3=BG,BorderSizePixel=0},f)
+    mk("UICorner",{CornerRadius=UDim.new(1,0)},bar)
+    local fill = mk("Frame",{Size=UDim2.new(0,0,1,0),BackgroundColor3=WHITE,BorderSizePixel=0},bar)
+    mk("UICorner",{CornerRadius=UDim.new(1,0)},fill)
+    grad(fill,0)
+    local knob = mk("Frame",{AnchorPoint=Vector2.new(.5,.5),Size=UDim2.fromOffset(18,18),Position=UDim2.new(0,0,.5,0),
+        BackgroundColor3=WHITE,BorderSizePixel=0,ZIndex=3},bar)
+    mk("UICorner",{CornerRadius=UDim.new(1,0)},knob)
+    table.insert(menuStrokes, mk("UIStroke",{Color=S.col.menu1,Thickness=2},knob))
+    local hit = mk("TextButton",{BackgroundTransparency=1,Text="",Position=UDim2.new(0,0,0,-14),
+        Size=UDim2.new(1,0,1,28),ZIndex=4},bar)
+
+    local function render()
+        local a = math.clamp((tbl[key]-min)/(max-min),0,1)
+        fill.Size = UDim2.new(a,0,1,0)
+        knob.Position = UDim2.new(a,0,.5,0)
+        valLbl.Text = tostring(tbl[key])
+    end
+    local function setFromX(x)
+        local a = math.clamp((x - bar.AbsolutePosition.X)/math.max(bar.AbsoluteSize.X,1),0,1)
+        local v = min + a*(max-min)
+        v = math.floor(v/step+0.5)*step
+        tbl[key] = math.clamp(v,min,max)
+        render()
+        if onChange then onChange() end
+    end
+    hit.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1 then
+            activeSlide = setFromX
+            setFromX(i.Position.X)
+            i.Changed:Connect(function()
+                if i.UserInputState==Enum.UserInputState.End and activeSlide==setFromX then activeSlide = nil end
+            end)
+        end
+    end)
+    render()
+    return render
+end
+
+-- PALETA COMPLETA (48 cores + barras R, G, B)
+local PRESETS = {}
+for i=0,11 do table.insert(PRESETS, Color3.fromHSV(i/12,1,1)) end
+for i=0,11 do table.insert(PRESETS, Color3.fromHSV(i/12,0.45,1)) end
+for i=0,11 do table.insert(PRESETS, Color3.fromHSV(i/12,1,0.55)) end
+for i=0,11 do table.insert(PRESETS, Color3.fromHSV(0,0,1-i/11)) end
+
+local function colorPicker(pg,text,key,order,onChange)
+    local cont = mk("Frame",{Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,LayoutOrder=order},pg)
+    mk("UIListLayout",{Padding=UDim.new(0,3),SortOrder=Enum.SortOrder.LayoutOrder},cont)
+    local hb = mk("TextButton",{Size=UDim2.new(1,0,0,32),BackgroundColor3=PANEL,Text="",AutoButtonColor=false,LayoutOrder=1},cont)
+    mk("UICorner",{CornerRadius=UDim.new(0,7)},hb)
+    label(hb,text,.6)
+    mk("TextLabel",{BackgroundTransparency=1,AnchorPoint=Vector2.new(1,.5),Position=UDim2.new(1,-58,.5,0),
+        Size=UDim2.fromOffset(60,20),Text="cores v",TextColor3=Color3.fromRGB(170,170,200),
+        Font=Enum.Font.GothamMedium,TextSize=11},hb)
+    local sw = mk("Frame",{Size=UDim2.fromOffset(40,20),AnchorPoint=Vector2.new(1,.5),Position=UDim2.new(1,-8,.5,0),BorderSizePixel=0},hb)
+    mk("UICorner",{CornerRadius=UDim.new(0,5)},sw)
+    mk("UIStroke",{Color=WHITE,Thickness=1},sw)
+
+    local pal = mk("Frame",{Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundColor3=BG,
+        BorderSizePixel=0,Visible=false,LayoutOrder=2},cont)
+    mk("UICorner",{CornerRadius=UDim.new(0,7)},pal)
+    mk("UIPadding",{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)},pal)
+    mk("UIListLayout",{Padding=UDim.new(0,4),SortOrder=Enum.SortOrder.LayoutOrder},pal)
+    local grid = mk("Frame",{Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,LayoutOrder=-1},pal)
+    mk("UIGridLayout",{CellSize=UDim2.fromOffset(24,24),CellPadding=UDim2.fromOffset(3,3)},grid)
+
+    local rgb = {r=0,g=0,b=0}
+    local renders = {}
+    local function readRGB()
+        local c = S.col[key]
+        rgb.r = math.floor(c.R*255+0.5)
+        rgb.g = math.floor(c.G*255+0.5)
+        rgb.b = math.floor(c.B*255+0.5)
+    end
+    local function sync()
+        readRGB()
+        sw.BackgroundColor3 = S.col[key]
+        for _,r in ipairs(renders) do r() end
+        if onChange then onChange() end
+    end
+    local function fromRGB()
+        S.col[key] = Color3.fromRGB(rgb.r,rgb.g,rgb.b)
+        sw.BackgroundColor3 = S.col[key]
+        if onChange then onChange() end
+    end
+    local built = false
+    local function build()
+        if built then return end
+        built = true
+        readRGB()
+        for _,pc in ipairs(PRESETS) do
+            local b = mk("TextButton",{BackgroundColor3=pc,Text="",AutoButtonColor=false},grid)
+            mk("UICorner",{CornerRadius=UDim.new(0,5)},b)
+            b.Activated:Connect(function() S.col[key] = pc; sync() end)
+        end
+        table.insert(renders, sliderRow(pal,"Vermelho (R)",rgb,"r",0,255,1,fromRGB))
+        table.insert(renders, sliderRow(pal,"Verde (G)",rgb,"g",0,255,1,fromRGB))
+        table.insert(renders, sliderRow(pal,"Azul (B)",rgb,"b",0,255,1,fromRGB))
+    end
+    hb.Activated:Connect(function()
+        if not pal.Visible then build() end
+        pal.Visible = not pal.Visible
+    end)
+    sw.BackgroundColor3 = S.col[key]
+end
+
+local unload
+do -- ESP
+    local pg = pages.ESP
+    toggleRow(pg,"ESP Ligado",S.esp,"on")
+    toggleCycleRow(pg,"Caixa",S.esp,"box","boxStyle",{"Cantos","Completa"})
+    toggleRow(pg,"Nome",S.esp,"name")
+    toggleRow(pg,"Distância",S.esp,"dist")
+    toggleCycleRow(pg,"Vida",S.esp,"health","healthSide",{"Esquerda","Direita"})
+    toggleRow(pg,"Vida (número)",S.esp,"hpText")
+    toggleCycleRow(pg,"Linha",S.esp,"line","lineFrom",{"Baixo","Centro","Cima"})
+    toggleRow(pg,"Esqueleto",S.esp,"skel")
+    toggleRow(pg,"Cor atrás da parede",S.esp,"wall")
+    sliderRow(pg,"Alcance ESP (studs)",S.esp,"range",100,999999,100)
+end
+do -- AIM
+    local pg = pages.AIM
+    toggleRow(pg,"Aimbot",S.aim,"on")
+    toggleRow(pg,"Mostrar FOV",S.aim,"showFov")
+    toggleRow(pg,"Checar parede",S.aim,"wallCheck")
+    cycleRow(pg,"Parte do alvo",S.aim,"part",{"Cabeça","Peito","Corpo"})
+    sliderRow(pg,"Raio do FOV",S.aim,"fov",10,1000,5)
+    sliderRow(pg,"Suavidade (%)",S.aim,"smooth",0,100,1)
+end
+do -- HITBOX
+    local pg = pages.HITBOX
+    toggleRow(pg,"Hitbox Ligado",S.hb,"on")
+    cycleRow(pg,"Parte",S.hb,"part",{"Corpo","Cabeça","Tudo"})
+    sliderRow(pg,"Tamanho",S.hb,"size",1,HB_MAX,1)
+    sliderRow(pg,"Transparência (0-10)",S.hb,"trans",0,10,1)
+    sliderRow(pg,"Alcance Hitbox",S.hb,"range",100,999999,100)
+end
+
+local teamLbl, teamCount, teamSw
+local plRefresh = {}
+local playersHolder
+local searchQuery = ""
+local function matchesSearch(p)
+    local q = searchQuery
+    if q == "" then return true end
+    return string.lower(p.Name):sub(1,#q) == q or string.lower(p.DisplayName):sub(1,#q) == q
+end
+local function rebuildPlayers()
+    if not playersHolder then return end
+    for _,c in ipairs(playersHolder:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    plRefresh = {}
+    local i = 0
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p ~= LP and matchesSearch(p) then
+            i = i + 1
+            local f = mk("Frame",{Size=UDim2.new(1,0,0,30),BackgroundColor3=PANEL,BorderSizePixel=0,LayoutOrder=i},playersHolder)
+            mk("UICorner",{CornerRadius=UDim.new(0,7)},f)
+            local shown = (p.DisplayName == p.Name) and p.Name or (p.DisplayName.." (@"..p.Name..")")
+            label(f,shown,.58)
+            local b = mk("TextButton",{Size=UDim2.fromOffset(74,22),AnchorPoint=Vector2.new(1,.5),
+                Position=UDim2.new(1,-6,.5,0),Font=Enum.Font.GothamBold,TextSize=11,TextColor3=WHITE,AutoButtonColor=false},f)
+            mk("UICorner",{CornerRadius=UDim.new(0,6)},b)
+            local function r()
+                local a = allyCache[p] == true
+                b.Text = a and "ALIADO" or "INIMIGO"
+                b.BackgroundColor3 = a and ON_C or OFF_C
+            end
+            b.Activated:Connect(function()
+                local a = allyCache[p] == true
+                OVER[p.UserId] = not a
+                pcall(refreshTeams)
+                r()
+            end)
+            plRefresh[p] = r
+            r()
+        end
+    end
+    if i == 0 then
+        local f = mk("Frame",{Size=UDim2.new(1,0,0,30),BackgroundColor3=PANEL,BorderSizePixel=0,LayoutOrder=1},playersHolder)
+        mk("UICorner",{CornerRadius=UDim.new(0,7)},f)
+        label(f,"Nenhum jogador encontrado",1)
+    end
+end
+
+do -- TIME
+    local pg = pages.TIME
+    toggleRow(pg,"Ignorar aliados",S.team,"ignore")
+    toggleRow(pg,"Detecção automática",S.team,"auto")
+    local f1 = row(pg); teamLbl = label(f1,"Método: ...",.8)
+    teamSw = mk("Frame",{Size=UDim2.fromOffset(24,18),AnchorPoint=Vector2.new(1,.5),Position=UDim2.new(1,-8,.5,0),
+        BorderSizePixel=0,BackgroundColor3=Color3.fromRGB(80,80,80)},f1)
+    mk("UICorner",{CornerRadius=UDim.new(0,5)},teamSw)
+    local f2 = row(pg); teamCount = label(f2,"Aliados ignorados: 0",1)
+    local f3 = row(pg,44)
+    mk("TextLabel",{BackgroundTransparency=1,Position=UDim2.fromOffset(10,0),Size=UDim2.new(1,-20,1,0),
+        Text="Detecta o time sozinho (Team, atributos, valores e pastas). Se o jogo usar outro jeito, toque no jogador abaixo para marcar ALIADO ou INIMIGO.",
+        TextColor3=Color3.fromRGB(190,190,210),TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+        Font=Enum.Font.Gotham,TextSize=11},f3)
+    local f4 = row(pg,30)
+    local rb = mk("TextButton",{Size=UDim2.new(1,-12,0,22),Position=UDim2.fromOffset(6,4),BackgroundColor3=Color3.fromRGB(70,60,200),
+        Text="LIMPAR MARCAÇÕES MANUAIS",TextColor3=WHITE,Font=Enum.Font.GothamBold,TextSize=11,AutoButtonColor=false},f4)
+    mk("UICorner",{CornerRadius=UDim.new(0,6)},rb)
+    rb.Activated:Connect(function()
+        for k in pairs(OVER) do OVER[k] = nil end
+        pcall(refreshTeams)
+    end)
+    pcall(function()
+        local f5 = row(pg,34)
+        local sb = mk("TextBox",{Size=UDim2.new(1,-12,0,26),Position=UDim2.fromOffset(6,4),BackgroundColor3=BG,
+            PlaceholderText="Pesquisar jogador (primeiras letras)",PlaceholderColor3=Color3.fromRGB(150,150,175),
+            Text="",TextColor3=WHITE,Font=Enum.Font.GothamMedium,TextSize=12,ClearTextOnFocus=false,
+            TextXAlignment=Enum.TextXAlignment.Left},f5)
+        mk("UICorner",{CornerRadius=UDim.new(0,6)},sb)
+        mk("UIPadding",{PaddingLeft=UDim.new(0,8)},sb)
+        sb:GetPropertyChangedSignal("Text"):Connect(function()
+            searchQuery = string.lower(sb.Text)
+            rebuildPlayers()
+        end)
+    end)
+    playersHolder = mk("Frame",{Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,LayoutOrder=100},pg)
+    mk("UIListLayout",{Padding=UDim.new(0,3),SortOrder=Enum.SortOrder.LayoutOrder},playersHolder)
+    rebuildPlayers()
+end
+table.insert(conns, Players.PlayerAdded:Connect(function() task.wait(0.3); rebuildPlayers() end))
+table.insert(conns, Players.PlayerRemoving:Connect(function() task.wait(0.1); rebuildPlayers() end))
+
+do -- CORES
+    local pg = pages.CORES
+    colorPicker(pg,"ESP (visível)","esp",1)
+    colorPicker(pg,"ESP (atrás da parede)","wall",2)
+    colorPicker(pg,"Cor do FOV","fov",3)
+    colorPicker(pg,"Cor da Hitbox","hb",4)
+    local function doMenuTheme()
+        pcall(function()
+            local seq = ColorSequence.new(S.col.menu1, S.col.menu2)
+            for _,g in ipairs(menuGrads) do g.Color = seq end
+            for _,sc in ipairs(menuScrolls) do sc.ScrollBarImageColor3 = S.col.menu1 end
+            for _,st in ipairs(menuStrokes) do st.Color = S.col.menu1 end
+        end)
+    end
+    local function doOrbTheme()
+        pcall(function()
+            local seq = ColorSequence.new(S.col.orb1, S.col.orb2)
+            for _,g in ipairs(orbGrads) do g.Color = seq end
+        end)
+    end
+    local function throttle(fn)
+        local pending = false
+        return function()
+            if pending then return end
+            pending = true
+            task.delay(0.06, function() pending = false; fn() end)
+        end
+    end
+    local applyMenuTheme = throttle(doMenuTheme)
+    local applyOrbTheme = throttle(doOrbTheme)
+    pcall(colorPicker,pg,"Menu (cor 1)","menu1",5,applyMenuTheme)
+    pcall(colorPicker,pg,"Menu (cor 2)","menu2",6,applyMenuTheme)
+    pcall(colorPicker,pg,"Botão NX (cor 1)","orb1",7,applyOrbTheme)
+    pcall(colorPicker,pg,"Botão NX (cor 2)","orb2",8,applyOrbTheme)
+end
+showTab("ESP")
+
+---------------------------------------------------------------- ESP
+local function newFrame()
+    return mk("Frame",{BorderSizePixel=0,BackgroundColor3=WHITE,Visible=false,AnchorPoint=Vector2.new(.5,.5)},layer)
+end
+local function newText(w)
+    return mk("TextLabel",{AnchorPoint=Vector2.new(.5,.5),Size=UDim2.fromOffset(w or 200,16),BackgroundTransparency=1,
+        Font=Enum.Font.GothamBold,TextSize=12,TextStrokeTransparency=0,Visible=false},layer)
+end
+local function rect(f,x,y,w,h,col)
+    f.Rotation=0
+    f.Position=UDim2.fromOffset(x+w/2,y+h/2)
+    f.Size=UDim2.fromOffset(w,h)
+    f.BackgroundColor3=col
+    f.Visible=true
+end
+local function line(f,a,b,th,col)
+    local d=b-a
+    f.Position=UDim2.fromOffset((a.X+b.X)/2,(a.Y+b.Y)/2)
+    f.Size=UDim2.fromOffset(d.Magnitude,th)
+    f.Rotation=math.deg(math.atan2(d.Y,d.X))
+    f.BackgroundColor3=col
+    f.Visible=true
+end
+
+local R15 = {
+    {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
+    {"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},
+    {"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},
+    {"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},
+    {"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
+}
+local R6 = {{"Head","Torso"},{"Torso","Left Arm"},{"Torso","Right Arm"},{"Torso","Left Leg"},{"Torso","Right Leg"}}
+
+local objs = {}
+local function makeESP()
+    local o = {box={}, skel={}, miss=0, vis=true, visT=0, hpShown=1}
+    for i=1,8 do o.box[i]=newFrame() end
+    -- barra de vida: fundo escuro arredondado + preenchimento com degradê
+    o.hbg = newFrame()
+    o.hbg.BackgroundTransparency = 0.25
+    mk("UICorner",{CornerRadius=UDim.new(1,0)},o.hbg)
+    o.hfill = newFrame()
+    mk("UICorner",{CornerRadius=UDim.new(1,0)},o.hfill)
+    mk("UIGradient",{Color=ColorSequence.new(WHITE, Color3.fromRGB(165,165,165)),Rotation=90},o.hfill)
+    o.tracer = newFrame()
+    o.name = newText(200)
+    o.dist = newText(120)
+    o.hp = newText(34)
+    return o
+end
+local function hideAll(o)
+    for _,f in ipairs(o.box) do f.Visible=false end
+    o.name.Visible=false; o.dist.Visible=false; o.hp.Visible=false
+    o.hbg.Visible=false; o.hfill.Visible=false; o.tracer.Visible=false
+    for _,f in pairs(o.skel) do f.Visible=false end
+end
+local function destroyESP(p)
+    local o = objs[p]; if not o then return end
+    for _,f in ipairs(o.box) do f:Destroy() end
+    for _,f in pairs(o.skel) do f:Destroy() end
+    o.name:Destroy(); o.dist:Destroy(); o.hp:Destroy()
+    o.hbg:Destroy(); o.hfill:Destroy(); o.tracer:Destroy()
+    objs[p]=nil
+end
+local function track(p)
+    if p == LP or objs[p] then return end
+    objs[p] = makeESP()
+end
+for _,p in ipairs(Players:GetPlayers()) do track(p) end
+table.insert(conns, Players.PlayerAdded:Connect(track))
+table.insert(conns, Players.PlayerRemoving:Connect(destroyESP))
+
+local function updateESP(p, vp, c, now)
+    local o = objs[p]
+    if not o then track(p); o = objs[p]; if not o then return "hide" end end
+    local char = p.Character
+    if not (S.esp.on and char and isEnemy(p)) then return "hide" end
+    local alive, hum = isAlive(char)
+    if not alive then return "hide" end
+    local root = getRoot(char)
+    if not root then return "soft" end
+
+    local dist = (root.Position - c.CFrame.Position).Magnitude
+    if dist > S.esp.range then return "hide" end
+
+    if now - o.visT > 0.1 then
+        o.visT = now
+        local ok, v = pcall(visible, root, char)
+        if ok then o.vis = v end
+    end
+    local col = (S.esp.wall and not o.vis) and S.col.wall or S.col.esp
+
+    local hipH = hum and hum.HipHeight or 2
+    local top = c:WorldToViewportPoint(root.Position + Vector3.new(0,2.8,0))
+    local bot = c:WorldToViewportPoint(root.Position - Vector3.new(0,math.max(hipH,2)+1,0))
+    if top.Z <= 0 or bot.Z <= 0 then return "hide" end
+
+    local h = math.max(bot.Y - top.Y, 14)
+    local midY = (top.Y + bot.Y)/2
+    local w = h*0.55
+    local cx = (top.X+bot.X)/2
+    local x1,y1,x2,y2 = cx-w/2, midY-h/2, cx+w/2, midY+h/2
+    local t = h > 40 and 1.5 or 1
+    local fs = math.clamp(math.floor(14 - dist/200),9,14)
+
+    -- caixa
+    if S.esp.box then
+        if S.esp.boxStyle=="Cantos" then
+            local L = math.max(math.min(w,h)*0.28,3)
+            local segs = {
+                {x1,y1,L,t},{x1,y1,t,L},{x2-L,y1,L,t},{x2-t,y1,t,L},
+                {x1,y2-t,L,t},{x1,y2-L,t,L},{x2-L,y2-t,L,t},{x2-t,y2-L,t,L},
+            }
+            for i=1,8 do local s=segs[i]; rect(o.box[i],s[1],s[2],s[3],s[4],col) end
+        else
+            local segs = {{x1,y1,w,t},{x1,y2-t,w,t},{x1,y1,t,h},{x2-t,y1,t,h}}
+            for i=1,4 do local s=segs[i]; rect(o.box[i],s[1],s[2],s[3],s[4],col) end
+            for i=5,8 do o.box[i].Visible=false end
+        end
+    else
+        for i=1,8 do o.box[i].Visible=false end
+    end
+
+    -- nome (em cima) e distância (embaixo)
+    if S.esp.name then
+        o.name.Text = p.DisplayName; o.name.TextSize = fs; o.name.TextColor3 = col
+        o.name.Position = UDim2.fromOffset(cx, y1 - fs*0.5 - 3); o.name.Visible = true
+    else o.name.Visible = false end
+    if S.esp.dist then
+        o.dist.Text = math.floor(dist).."m"; o.dist.TextSize = fs; o.dist.TextColor3 = col
+        o.dist.Position = UDim2.fromOffset(cx, y2 + fs*0.5 + 3); o.dist.Visible = true
+    else o.dist.Visible = false end
+
+    -- vida (barra fina, arredondada, com animação suave)
+    local hp, mx = readHealth(char, hum)
+    if S.esp.health and hp then
+        local fr = math.clamp(hp/mx,0,1)
+        o.hpShown = o.hpShown + (fr - o.hpShown)*0.25
+        local sf = math.clamp(o.hpShown,0,1)
+        local bw = math.clamp(math.floor(h*0.03),2,4)
+        local bh = h*0.9
+        local by = midY - bh/2
+        local left = (S.esp.healthSide=="Esquerda")
+        local bx = left and (x1-bw-5) or (x2+5)
+        rect(o.hbg,bx-1,by-1,bw+2,bh+2,Color3.fromRGB(10,10,10))
+        local fh = math.max(bh*sf,2)
+        rect(o.hfill,bx,by+bh-fh,bw,fh,Color3.fromHSV(sf*0.33,0.9,1))
+        if S.esp.hpText then
+            o.hp.Text = tostring(math.floor(hp+0.5)); o.hp.TextSize = math.max(fs-3,8); o.hp.TextColor3 = WHITE
+            local tx = left and (bx-19) or (bx+bw+19)
+            o.hp.Position = UDim2.fromOffset(tx, math.clamp(by+bh-fh, by, by+bh)); o.hp.Visible = true
+        else o.hp.Visible = false end
+    else
+        o.hbg.Visible=false; o.hfill.Visible=false; o.hp.Visible=false
+    end
+
+    -- linha
+    if S.esp.line then
+        local oy = (S.esp.lineFrom=="Baixo") and vp.Y or ((S.esp.lineFrom=="Centro") and vp.Y/2 or 0)
+        line(o.tracer,Vector2.new(vp.X/2,oy),Vector2.new(cx,y2),1.2,col)
+    else o.tracer.Visible=false end
+
+    -- esqueleto
+    if S.esp.skel then
+        local list = char:FindFirstChild("UpperTorso") and R15 or R6
+        for i=1,14 do
+            local pr, okk = list[i], false
+            if pr then
+                local a,b = char:FindFirstChild(pr[1]), char:FindFirstChild(pr[2])
+                if a and b then
+                    local pa = c:WorldToViewportPoint(a.Position)
+                    local pb = c:WorldToViewportPoint(b.Position)
+                    if pa.Z>0 and pb.Z>0 then
+                        local f = o.skel[i]
+                        if not f then f = newFrame(); o.skel[i] = f end
+                        line(f,Vector2.new(pa.X,pa.Y),Vector2.new(pb.X,pb.Y),1.2,col); okk=true
+                    end
+                end
+            end
+            if not okk and o.skel[i] then o.skel[i].Visible=false end
+        end
+    else
+        for _,f in pairs(o.skel) do f.Visible=false end
+    end
+    return nil
+end
+
+---------------------------------------------------------------- FOV + AIM
+local fovFrame = mk("Frame",{AnchorPoint=Vector2.new(.5,.5),BackgroundTransparency=1,BorderSizePixel=0,Visible=false},layer)
+mk("UICorner",{CornerRadius=UDim.new(1,0)},fovFrame)
+local fovStroke = mk("UIStroke",{Thickness=1.5,Color=WHITE},fovFrame)
+
+local function getAimPart(char)
+    local pn = S.aim.part
+    if pn=="Cabeça" then return char:FindFirstChild("Head") or getRoot(char)
+    elseif pn=="Peito" then return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or getRoot(char)
+    else return getRoot(char) end
+end
+
+local function aimbot(vp, c)
+    local center = Vector2.new(vp.X/2, vp.Y/2)
+    local bestD, bestPart = S.aim.fov, nil
+    for _,p in ipairs(Players:GetPlayers()) do
+        local char = p.Character
+        if char and isEnemy(p) and isAlive(char) then
+            local part = getAimPart(char)
+            if part then
+                local sp = c:WorldToViewportPoint(part.Position)
+                if sp.Z>0 then
+                    local d = (Vector2.new(sp.X,sp.Y)-center).Magnitude
+                    if d < bestD and (not S.aim.wallCheck or visible(part,char)) then
+                        bestD, bestPart = d, part
+                    end
+                end
+            end
+        end
+    end
+    if bestPart then
+        local alpha = math.clamp(1 - S.aim.smooth/100, 0.01, 1)
+        c.CFrame = c.CFrame:Lerp(CFrame.lookAt(c.CFrame.Position, bestPart.Position), alpha)
+    end
+end
+
+---------------------------------------------------------------- HITBOX
+local orig = {}
+local function restore(part)
+    local o = orig[part]
+    if o and part.Parent then
+        pcall(function()
+            part.Size=o.Size; part.Transparency=o.Tr; part.CanCollide=o.CC
+            part.Color=o.Col; part.Material=o.Mat; part.Massless=o.Ms
+            part.CanQuery=o.CQ; part.CanTouch=o.CT
+        end)
+    end
+    orig[part]=nil
+end
+local function targetParts(char)
+    local list = {}
+    local mode = S.hb.part
+    if mode == "Cabeça" then
+        local h = char:FindFirstChild("Head")
+        if h and h:IsA("BasePart") then table.insert(list,h) end
+    elseif mode == "Tudo" then
+        for _,ch in ipairs(char:GetChildren()) do
+            if ch:IsA("BasePart") then table.insert(list,ch) end
+        end
+    else
+        local r = char:FindFirstChild("HumanoidRootPart") or getRoot(char)
+        if r and r:IsA("BasePart") then table.insert(list,r) end
+        local t = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+        if t and t:IsA("BasePart") and t ~= r then table.insert(list,t) end
+    end
+    return list
+end
+local function hitboxStep(c)
+    if not S.hb.on and next(orig) == nil then return end
+    local active = {}
+    if S.hb.on then
+        for _,p in ipairs(Players:GetPlayers()) do
+            local char = p.Character
+            if char and isEnemy(p) and isAlive(char) then
+                local root = getRoot(char)
+                if root and (root.Position - c.CFrame.Position).Magnitude <= S.hb.range then
+                    for _,part in ipairs(targetParts(char)) do active[part]=true end
+                end
+            end
+        end
+    end
+    for part in pairs(orig) do
+        if not part.Parent then orig[part]=nil
+        elseif not active[part] then restore(part) end
+    end
+    local n = math.clamp(S.hb.size,1,HB_MAX)
+    local sz = Vector3.new(n,n,n)
+    local tr = math.clamp(S.hb.trans,0,10)/10
+    local col = S.col.hb
+    for part in pairs(active) do
+        if not orig[part] then
+            orig[part]={Size=part.Size,Tr=part.Transparency,CC=part.CanCollide,Col=part.Color,
+                Mat=part.Material,Ms=part.Massless,CQ=part.CanQuery,CT=part.CanTouch}
+        end
+        pcall(function()
+            if part.Size ~= sz then part.Size = sz end
+            if part.Transparency ~= tr then part.Transparency = tr end
+            if part.CanCollide then part.CanCollide = false end
+            if not part.Massless then part.Massless = true end
+            if not part.CanQuery then part.CanQuery = true end
+            if not part.CanTouch then part.CanTouch = true end
+            if part.Material ~= Enum.Material.Neon then part.Material = Enum.Material.Neon end
+            if part.Color ~= col then part.Color = col end
+        end)
+    end
+end
+
+---------------------------------------------------------------- LOOPS
+pcall(refreshTeams)
+local lastScan, lastTeam = 0, 0
+table.insert(conns, RunService.RenderStepped:Connect(function()
+    local c = cam()
+    if not c then return end
+    local vp = c.ViewportSize
+    local now = tick()
+
+    fovFrame.Visible = S.aim.showFov
+    fovFrame.Position = UDim2.fromOffset(vp.X/2, vp.Y/2)
+    fovFrame.Size = UDim2.fromOffset(S.aim.fov*2, S.aim.fov*2)
+    fovStroke.Color = S.col.fov
+
+    if now - lastScan > 2 then
+        lastScan = now
+        for _,p in ipairs(Players:GetPlayers()) do track(p) end
+    end
+
+    if now - lastTeam > 1.0 then
+        lastTeam = now
+        pcall(refreshTeams)
+        local t = LP.Team
+        teamLbl.Text = "Método: "..(teamMethod or "nenhum (marque manual)")
+        teamSw.BackgroundColor3 = t and t.TeamColor.Color or Color3.fromRGB(80,80,80)
+        teamCount.Text = "Aliados ignorados: "..(S.team.ignore and teamAllyCount or 0)
+        for _,r in pairs(plRefresh) do pcall(r) end
+    end
+
+    for p,o in pairs(objs) do
+        local ok, res = pcall(updateESP, p, vp, c, now)
+        if ok and res == nil then
+            o.miss = 0
+            o.hidden = false
+        elseif ok and res == "hide" then
+            o.miss = 0
+            if not o.hidden then hideAll(o); o.hidden = true end
+        else
+            o.miss = o.miss + 1
+            if o.miss > 8 and not o.hidden then hideAll(o); o.hidden = true end
+        end
+    end
+    if S.aim.on then pcall(aimbot, vp, c) end
+end))
+table.insert(conns, RunService.Heartbeat:Connect(function()
+    local c = cam(); if c then pcall(hitboxStep, c) end
+end))
+table.insert(conns, RunService.Stepped:Connect(function()
+    local c = cam(); if c then pcall(hitboxStep, c) end
+end))
+
+---------------------------------------------------------------- UNLOAD
+unload = function()
+    for _,cn in ipairs(conns) do pcall(function() cn:Disconnect() end) end
+    for part in pairs(orig) do restore(part) end
+    for p in pairs(objs) do destroyESP(p) end
+    gui:Destroy(); layer:Destroy()
+    genv.__NEBULAX_UNLOAD = nil
+end
+genv.__NEBULAX_UNLOAD = unload
+end -- fim NEBULA_MAIN
+
+---------------------------------------------------------------- EXECUÇÃO PROTEGIDA
+local okRun, errRun = pcall(NEBULA_MAIN)
+if not okRun then
+    warn("NEBULA X erro: "..tostring(errRun))
+    pcall(function()
+        local host
+        local okH, h = pcall(function() return gethui and gethui() end)
+        if okH and h then host = h end
+        if not host then
+            local okC = pcall(function() host = game:GetService("CoreGui") end)
+            if not okC or not host then host = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui") end
+        end
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "NX_Erro"; sg.ResetOnSpawn = false; sg.IgnoreGuiInset = true; sg.DisplayOrder = 1000
+        sg.Parent = host
+        local lb = Instance.new("TextLabel")
+        lb.Size = UDim2.new(1,-20,0,90); lb.Position = UDim2.fromOffset(10,10)
+        lb.BackgroundColor3 = Color3.fromRGB(200,30,30); lb.TextColor3 = Color3.new(1,1,1)
+        lb.TextWrapped = true; lb.TextSize = 14; lb.Font = Enum.Font.GothamBold
+        lb.Text = "NEBULA X ERRO: "..tostring(errRun).."  (toque para fechar)"
+        lb.Parent = sg
+        local bt = Instance.new("TextButton")
+        bt.Size = UDim2.fromScale(1,1); bt.BackgroundTransparency = 1; bt.Text = ""; bt.Parent = lb
+        bt.Activated:Connect(function() sg:Destroy() end)
+    end)
+end
